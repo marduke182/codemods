@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "baseUrl": "./",
+    "paths": {
+      "@marduke182/fake-package": [
+        "../fake-package/src/",
+        "./fake-package/src/"
+      ],
+      "@marduke182/fake-package/entry-point-a": [
+        "../fake-package/src/entry-point-a",
+        "./fake-package/src/entry-point-a"
+      ],
+      "@marduke182/fake-package/entry-point-b": [
+        "../fake-package/src/entry-point-b",
+        "./fake-package/src/entry-point-b"
+      ]
+    }
+  }
+}

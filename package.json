@@ -9,7 +9,8 @@
     "babel-file-loader": "^2.0.0",
     "jest": "^25.1.0",
     "jscodeshift": "^0.7.0",
-    "resolve": "^1.15.1"
+    "resolve": "^1.15.1",
+    "tsconfig-paths": "^3.9.0"
   },
   "devDependencies": {
     "@types/jest": "^25.1.3",
