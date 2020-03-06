@@ -2,9 +2,15 @@ import * as resolve from "resolve";
 import * as Path from "path";
 import * as Fs from "fs";
 
+export interface FileInfo {
+  baseDir: string;
+  id: string;
+  path: string;
+}
+
 export const resolvePaths = (
   paths: string[]
-): { baseDir: string; id: string } | null => {
+): FileInfo | null => {
   const validPaths = paths.filter(path => {
     const dirName = Path.dirname(path);
     return Fs.existsSync(dirName);
@@ -33,7 +39,8 @@ export const resolvePaths = (
   }
 
   return {
-    baseDir,
-    id
+    baseDir: Path.dirname(filePath),
+    id: `./${Path.basename(filePath)}`,
+    path: filePath
   };
 };

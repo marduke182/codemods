@@ -1,135 +1,302 @@
 import { API, ASTPath, Transform, ImportDeclaration } from "jscodeshift";
-import { loadConfig } from "tsconfig-paths";
+import { ConfigLoaderSuccessResult, loadConfig } from "tsconfig-paths";
 import * as Path from "path";
-import { resolvePaths } from "./utils/resolvePath";
+import { FileInfo, resolvePaths } from "./utils/resolvePath";
 import { getExportedNames } from "./utils/get-export-names";
+import { readFileSync } from "fs";
+import {
+  ExportNamespaceSpecifier,
+  ExportSpecifier,
+  File, ImportDefaultSpecifier,
+  ImportNamespaceSpecifier,
+  ImportSpecifier,
+} from 'jscodeshift/src/core';
 
 let entryPoints: Set<string>;
 let namesEntryPointOwner: Map<string, string>;
+
+interface NameInfo {
+  isDefault: boolean;
+  localName: string;
+  importedName: string;
+}
+
+interface ExporteNameInfo {
+  specifier: ExportNamespaceSpecifier | ExportSpecifier;
+  path: string;
+  local?: string;
+  exported: string;
+}
+
+class EntryPoints {
+  private api: API;
+  private rootInfo: {
+    packageName: string;
+    baseDir?: string;
+    id?: string;
+    path?: string;
+  };
+
+  private readonly pathsToEntryPoint = new Map<string, string>();
+  private readonly entryPointInfo = new Map<string, FileInfo>();
+  private readonly entryPointExportedNames = new Map<
+    string,
+    Map<string, ExporteNameInfo>
+  >();
+  private readonly exportedNamesToEntryPoint = new Map<string, string>();
+
+  constructor(packageName: string, api: API) {
+    this.rootInfo = { packageName };
+    this.api = api;
+  }
+
+  private getEntryPointInfo(
+    entryPoint: string,
+    candidatePaths: string[],
+    tsConfig: ConfigLoaderSuccessResult
+  ): FileInfo {
+    const fileInfo = resolvePaths(
+      candidatePaths.map(path => {
+        return Path.resolve(tsConfig.absoluteBaseUrl, path);
+      })
+    );
+
+    if (!fileInfo) {
+      throw new Error(`No valid path for ${entryPoint}`);
+    }
+
+    return fileInfo;
+  }
+
+  private registerEntryPoint(entryPoint: string, fileInfo: FileInfo) {
+    this.pathsToEntryPoint.set(fileInfo.path, entryPoint);
+    this.entryPointInfo.set(entryPoint, fileInfo);
+    this.entryPointExportedNames.set(
+      entryPoint,
+      new Map<string, ExporteNameInfo>()
+    );
+  }
+
+  private *exportedNames(): Iterable<ExporteNameInfo> {
+    const j = this.api.jscodeshift;
+    if (!this.rootInfo.path) {
+      throw new Error("No root file info");
+    }
+
+    let buffer = readFileSync(this.rootInfo.path);
+    const sourceRoot = j(buffer.toString());
+
+    const exportedNameDeclarations = sourceRoot.find(j.ExportNamedDeclaration);
+
+    for (const exportNamedDeclaration of exportedNameDeclarations.nodes()) {
+      // We dont care declarations exports only source ones.
+      if (!exportNamedDeclaration.source) {
+        continue;
+      }
+      let fileInfo: FileInfo;
+      try {
+        fileInfo = resolvePaths([
+          Path.resolve(
+            this.rootInfo.baseDir,
+            exportNamedDeclaration.source.value as string
+          )
+        ]);
+      } catch (e) {
+        // If no found ignore it.
+        continue;
+      }
+      // It's not an entry point ignore it
+      if (!this.pathsToEntryPoint.has(fileInfo.path)) {
+        continue;
+      }
+
+      const { specifiers } = exportNamedDeclaration;
+      if (specifiers) {
+        for (const [, specifier] of specifiers.entries()) {
+          // @ts-ignore
+          if (specifier.type === "ExportNamespaceSpecifier") {
+            // do something
+            yield {
+              path: fileInfo.path,
+              exported: specifier.exported.name,
+              specifier
+            };
+            continue;
+          }
+
+          yield {
+            specifier,
+            path: fileInfo.path,
+            local: specifier.local.name,
+            exported: specifier.exported.name
+          };
+        }
+      }
+    }
+  }
+
+  loadEntryPoints(tsConfig: ConfigLoaderSuccessResult) {
+    Object.entries(tsConfig.paths)
+      // Get only the entry points related to root
+      .filter(
+        ([entryPoint]) => entryPoint.indexOf(this.rootInfo.packageName) !== -1
+      )
+      .forEach(([entryPoint, validPaths]) => {
+        const fileInfo = this.getEntryPointInfo(
+          entryPoint,
+          validPaths,
+          tsConfig
+        );
+        if (entryPoint === this.rootInfo.packageName) {
+          // This is the root package, let's get the path
+          this.rootInfo = {
+            ...this.rootInfo,
+            ...fileInfo
+          };
+          return;
+        }
+        // Its an entryPoint
+        this.registerEntryPoint(entryPoint, fileInfo);
+      });
+
+    for (const exportedNameInfo of this.exportedNames()) {
+      const entryPoint = this.pathsToEntryPoint.get(exportedNameInfo.path);
+
+      this.exportedNamesToEntryPoint.set(exportedNameInfo.exported, entryPoint);
+      this.entryPointExportedNames
+        .get(entryPoint)
+        .set(exportedNameInfo.exported, exportedNameInfo);
+    }
+  }
+  replaceImportDeclaration(path: ASTPath<ImportDeclaration>): void {
+    const j = this.api.jscodeshift;
+    const groupByEntryPoint = new Map<
+      string,
+      Array<ImportSpecifier | ImportNamespaceSpecifier | ImportDefaultSpecifier>
+    >();
+    const rootExport: Array<ImportSpecifier | ImportNamespaceSpecifier> = [];
+    // initialize
+    this.entryPointInfo.forEach((_, entryPoint) => {
+      groupByEntryPoint.set(entryPoint, []);
+    });
+
+    const specifiers = path.value.specifiers;
+    if (specifiers) {
+      for (const [, specifier] of specifiers.entries()) {
+        if (
+          specifier.type === "ImportNamespaceSpecifier" ||
+          specifier.type === "ImportDefaultSpecifier"
+        ) {
+          // TODO: let's take care of this later
+          continue;
+        }
+        const importedName = specifier.imported.name;
+        const entryPoint = this.exportedNamesToEntryPoint.get(importedName);
+        if (!entryPoint) {
+          // Do nothing if the import value is not coming from an entry point
+          rootExport.push(specifier);
+          continue;
+        }
+        const exportNameInfo = this.entryPointExportedNames
+          .get(entryPoint)
+          .get(importedName);
+
+        if (!exportNameInfo) {
+          throw new Error("Should not happen");
+        }
+
+        if (exportNameInfo.specifier.type === "ExportNamespaceSpecifier") {
+          const name = specifier.local
+            ? specifier.local.name
+            : exportNameInfo.exported;
+          groupByEntryPoint
+            .get(entryPoint)
+            .push(j.importNamespaceSpecifier(j.identifier(name)));
+        } else {
+          const imported = exportNameInfo.local
+            ? exportNameInfo.local
+            : exportNameInfo.exported;
+          const local = specifier.local ? specifier.local.name : undefined;
+
+          if (imported === 'default' && local) {
+            groupByEntryPoint
+              .get(entryPoint)
+              .push(
+                j.importDefaultSpecifier(
+                  j.identifier(local)
+                )
+              );
+
+          } else {
+            groupByEntryPoint
+              .get(entryPoint)
+              .push(
+                j.importSpecifier(
+                  j.identifier(imported),
+                  local ? j.identifier(local) : undefined
+                )
+              );
+          }
+
+
+        }
+      }
+    }
+
+    const entryPointImportDeclarations: ImportDeclaration[] = [];
+    if (rootExport.length > 0) {
+      entryPointImportDeclarations.push(
+        j.importDeclaration(
+          rootExport,
+          j.stringLiteral(this.rootInfo.packageName)
+        )
+      );
+    }
+
+    groupByEntryPoint.forEach((importNames, entryPoint) => {
+      if (importNames.length === 0) {
+        return; // do nothing
+      }
+      entryPointImportDeclarations.push(
+        j.importDeclaration(importNames, j.stringLiteral(entryPoint))
+      );
+    });
+
+    path.replace(...entryPointImportDeclarations);
+  }
+}
+
+let newEntryPoints: EntryPoints;
 
 const initializeEntryPointNames = (
   api: API,
   tsConfigPath: string,
   packagePath: string
 ) => {
-  if (entryPoints) {
+  if (newEntryPoints) {
     return;
   }
+
+  // Load tsconfig, we assume that ts config path is already a full path.
   const tsConfig = loadConfig(tsConfigPath);
 
   if (tsConfig.resultType !== "success") {
     throw new Error(tsConfig.message);
   }
 
-  entryPoints = new Set<string>();
-  namesEntryPointOwner = new Map<string, string>();
+  /**
+   * Pseudo Algorithm to create entry point meta data
+   * 1. Get all entry points file path and root file path
+   * 2. Parse root file
+   *    i. Iterate for each export with an specifier (these are the once that can reexport from entrypoints)
+   *    ii. Check resolved file path with the stored entry points, if it is an entry point then:
+   *      a. Store name information (We need to keep renames to used it later, AKA `default as` or `name as`)
+   *
+   *
+   */
+  newEntryPoints = new EntryPoints(packagePath, api);
 
-  // @ts-ignore
-  for (const [entryPoint, paths] of Object.entries(tsConfig.paths)) {
-    if (entryPoint.indexOf(packagePath) === -1 || entryPoint === packagePath) {
-      // Ignore not needed package
-      continue;
-    }
-    const filePath = resolvePaths(
-      paths.map(path => {
-        return Path.resolve(tsConfig.absoluteBaseUrl, path);
-      })
-    );
-
-    if (!filePath) {
-      throw new Error(`No valid path for ${entryPoint}`);
-    }
-
-    const exportInfo = getExportedNames(api, { visited: new Set<string>() })(
-      filePath.baseDir,
-      filePath.id
-    );
-
-    entryPoints.add(entryPoint);
-    exportInfo.namedExports.forEach(namedExport => {
-      namesEntryPointOwner.set(namedExport, entryPoint);
-    });
-  }
-};
-
-interface ImportName {
-  local: string | null;
-  imported: string | null;
-  isDefault: boolean;
-}
-
-const replaceImportForEntryPoints = (api: API, rootPath: string) => (
-  path: ASTPath<ImportDeclaration>,
-  i: number
-) => {
-  const j = api.jscodeshift;
-
-  const groupByEntryPoint = new Map<string, ImportName[]>();
-  const rootExport: ImportName[] = [];
-  // initialize
-  entryPoints.forEach(entryPoint => {
-    groupByEntryPoint.set(entryPoint, []);
-  });
-
-  const namesUsed: ImportName[] = [];
-  const specifiers = path.value.specifiers;
-  if (specifiers) {
-    specifiers.forEach(specifier => {
-      namesUsed.push({
-        imported: specifier.imported ? specifier.imported.name : null,
-        local: specifier.local ? specifier.local.name : null,
-        isDefault:
-          specifier.type === "ImportDefaultSpecifier" ||
-          (specifier.imported && specifier.imported.name === "default")
-      });
-    });
-  }
-  if (!entryPoints) {
-    throw new Error("Entry points not created");
-  }
-
-  for (const importName of namesUsed) {
-    const entryPoint = namesEntryPointOwner.get(importName.imported);
-    if (entryPoint) {
-      groupByEntryPoint.get(entryPoint)!.push(importName);
-    } else {
-      rootExport.push(importName);
-    }
-  }
-
-  // console.log(groupByEntryPoint);
-  // console.log(rootExport);
-  const entryPointImportDeclarations: ImportDeclaration[] = [];
-  if (rootExport.length > 0) {
-    entryPointImportDeclarations.push(j.importDeclaration(
-      rootExport.map(name => {
-        return j.importSpecifier(
-          j.identifier(name.imported),
-          name.local ? j.identifier(name.local) : undefined
-        );
-      }),
-      j.stringLiteral(rootPath)
-    ))
-  }
-
-  groupByEntryPoint.forEach((importNames, entryPoint) => {
-    if (importNames.length === 0) {
-      return; // do nothing
-    }
-    entryPointImportDeclarations.push(
-      j.importDeclaration(
-        importNames.map(name => {
-          return j.importSpecifier(
-            j.identifier(name.imported),
-            name.local ? j.identifier(name.local) : undefined
-          );
-        }),
-        j.stringLiteral(entryPoint)
-      )
-    );
-  });
-
-  path.replace(...entryPointImportDeclarations);
+  newEntryPoints.loadEntryPoints(tsConfig);
 };
 
 const transform: Transform = (fileInfo, api, options) => {
@@ -148,7 +315,9 @@ const transform: Transform = (fileInfo, api, options) => {
         value: options.packagePath
       }
     })
-    .forEach(replaceImportForEntryPoints(api, options.packagePath));
+    .forEach((path: ASTPath<ImportDeclaration>, i: number) => {
+      newEntryPoints.replaceImportDeclaration(path);
+    });
 
   return root.toSource({ quote: "single" });
 };
