@@ -167,6 +167,8 @@ class EntryPoints {
         .get(entryPoint)
         .set(exportedNameInfo.exported, exportedNameInfo);
     }
+
+    console.log(this.exportedNamesToEntryPoint)
   }
   replaceImportDeclaration(path: ASTPath<ImportDeclaration>): void {
     const j = this.api.jscodeshift;
@@ -271,7 +273,7 @@ let newEntryPoints: EntryPoints;
 const initializeEntryPointNames = (
   api: API,
   tsConfigPath: string,
-  packagePath: string
+  packageName: string
 ) => {
   if (newEntryPoints) {
     return;
@@ -291,10 +293,8 @@ const initializeEntryPointNames = (
    *    i. Iterate for each export with an specifier (these are the once that can reexport from entrypoints)
    *    ii. Check resolved file path with the stored entry points, if it is an entry point then:
    *      a. Store name information (We need to keep renames to used it later, AKA `default as` or `name as`)
-   *
-   *
    */
-  newEntryPoints = new EntryPoints(packagePath, api);
+  newEntryPoints = new EntryPoints(packageName, api);
 
   newEntryPoints.loadEntryPoints(tsConfig);
 };
@@ -302,17 +302,17 @@ const initializeEntryPointNames = (
 const transform: Transform = (fileInfo, api, options) => {
   const j = api.jscodeshift;
   const root = j(fileInfo.source);
-  if (!options.tsConfigPath || !options.packagePath) {
+  if (!options.tsConfigPath || !options.packageName) {
     throw new Error("Need to specified as tsconfig path and the package name");
   }
 
-  initializeEntryPointNames(api, options.tsConfigPath, options.packagePath);
+  initializeEntryPointNames(api, options.tsConfigPath, options.packageName);
 
   root
     .find(j.ImportDeclaration, {
       source: {
         type: "StringLiteral",
-        value: options.packagePath
+        value: options.packageName
       }
     })
     .forEach((path: ASTPath<ImportDeclaration>, i: number) => {
