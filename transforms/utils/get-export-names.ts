@@ -17,6 +17,7 @@ interface ExportInfo {
 function getExportName(path: ASTPath<ExportNamedDeclaration>): string[] {
   const names: string[] = [];
   const declaration = path.value.declaration;
+  
   if (declaration) {
     if (
       [
@@ -41,8 +42,11 @@ function getExportName(path: ASTPath<ExportNamedDeclaration>): string[] {
     } else if (declaration.type === 'TSInterfaceDeclaration') {
       // @ts-ignore
       names.push(declaration.id.name);
+    } else {
+      names.push(declaration.id.name);
     }
   }
+
   const specifiers = path.value.specifiers;
   if (specifiers) {
     specifiers.forEach(specifier => {
